@@ -1,0 +1,684 @@
+---
+title: "Final Notes"
+author: "Courtland Drake"
+date: "2025-11-14"
+output: html_document
+---
+# Project 3: Data Visualization with R Shiny -- Notes
+```{r}
+library(tidyverse)
+library(shiny)
+library(maps)
+library(DT)
+```
+
+## Brainstorming Quesions for World Bank Data
+```{r}
+
+bank_data <- read.csv("/Users/courtlanddrake/Data_Viz/world_bank_development_indicators.csv")
+
+head(bank_data)
+```
+```{r}
+#Population growth over time. One country for now but will be able to select countries in the app.
+us_data <- bank_data %>% 
+  filter(country == "United States")
+
+us_data$year <- substr(us_data$date, 1, 4) 
+
+us_data$year <- as.numeric(us_data$year)
+
+ggplot(us_data, aes(x = year, y = population)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Year", y = "Population", title = "U.S Population Growth") +
+  theme_minimal()
+  
+```
+
+```{r}
+#Relationship between gdp and user choice (life expectancy for now)
+bank_data$year <- substr(bank_data$date, 1, 4) 
+bank_data$year <- as.numeric(bank_data$year)
+
+gdp_life <- bank_data %>% 
+  group_by(year) %>% 
+  summarise(
+    avg_gdp = mean(GDP_current_US, na.rm = TRUE),
+    avg_life_exp = mean(life_expectancy_at_birth, na.rm = TRUE)) %>% 
+  ungroup()
+#Will probably do this differently, but wanted to get a basic outline down.
+ggplot(gdp_life, aes(x = avg_life_exp, y = avg_gdp)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "GDP vs Life Expectancy")
+```
+
+```{r}
+#World map of pop/gdp/life exp in a given year.
+
+bank_2000 <- bank_data %>% 
+  filter(year == 2000)
+# Get world map data (from maps package)
+world_map <- map_data("world")
+
+bank_2000 <- bank_2000 %>%
+  mutate(country = case_when(
+    country == "United States" ~ "USA",
+    country == "United Kingdom" ~ "UK",
+    country == "South Korea" ~ "Korea, South",
+    country == "North Korea" ~ "Korea, North",
+    country == "Czech Republic" ~ "Czechia",
+    country == "Democratic Republic of the Congo" ~ "Democratic Republic of the Congo",
+    country == "Congo, Dem. Rep." ~ "Democratic Republic of the Congo",
+    country == "Congo, Rep." ~ "Republic of Congo",
+    country == "Ivory Coast" ~ "Côte d’Ivoire",
+    country == "Tanzania" ~ "Tanzania",
+    country == "Russian Federation" ~ "Russia",
+    country == "Egypt Arab Rep." ~ "Egypt",
+    country == "Turkiye" ~ "Turkey",
+    TRUE ~ country
+  ))
+# Merge GDP data with map data
+world_data <- left_join(world_map, bank_2000, 
+                        by = c("region" = "country"))
+# Plot the map
+ggplot(world_data, aes(long, lat, group = group, fill = GDP_current_US)) +
+  geom_polygon(color = "gray70", size = 0.1) +
+  coord_fixed(1.3) +
+  scale_fill_viridis_c(option = "plasma", trans = "log10",
+                       name = "GDP per capita\n(log scale)") +
+  labs(title = "World GDP per capita (2007)") +
+  theme_minimal() +
+  theme(legend.position = "right", plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_blank(), axis.text = element_blank(), panel.grid = element_blank())
+
+```
+
+## Brainstorming for Traffic Accidents Data
+```{r}
+car_accidents <- read.csv("/Users/courtlanddrake/Data_Viz/Accidents0515.csv")
+
+car_accidents$year <- substr(car_accidents$Date, 7, 10)
+car_accidents$year <- as.numeric(car_accidents$year)
+```
+
+## Trend of casualties per year
+```{r}
+casualties_per_year <- car_accidents %>% 
+  group_by(year) %>% 
+  summarise(total_casualties = sum(Number_of_Casualties))
+
+ggplot(casualties_per_year, aes(x = year, y = total_casualties)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Year", y = "Number of Casualties", title = "Casualties from Car Accidents over Time") +
+  theme_minimal()
+```
+
+## Interactive Heat Map
+```{r}
+library(leaflet)
+library(leaflet.extras)
+
+car_accidents_clean <- car_accidents %>%
+  filter(!is.na(Longitude) & !is.na(Latitude)) %>% 
+  filter(year == 2010)
+
+leaflet(car_accidents_clean) %>%
+  addTiles() %>% 
+  addHeatmap(lng = ~Longitude, lat = ~Latitude,
+    radius = 15, blur = 20, max = 0.05) %>%
+  setView(lng = -1.5, lat = 54, zoom = 6)
+
+```
+
+# Starting App Implementation
+## UI/Server for Bank Dataset
+```{r}
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(leaflet)
+
+bank_data <- read.csv("/Users/courtlanddrake/Data_Viz/world_bank_development_indicators.csv")
+
+# Ensure year is numeric (important!)
+bank_data$year <- substr(bank_data$date, 1, 4)
+bank_data$year <- as.numeric(bank_data$year)
+
+ui <- navbarPage("World Bank Visualization App",
+
+  tabPanel("Welcome", fluidPage(titlePanel("Welcome to the World Bank Data Explorer"), br(),
+      h4("Use the tab above to explore World Bank development indicators, 
+          visualize trends over time, and examine country-level changes.")
+    )
+  ),
+
+  tabPanel("World Bank Data",
+
+    sidebarLayout(sidebarPanel(h4("Controls"),
+
+        selectInput("countries", "Select Countries:", choices = sort(unique(bank_data$country)),
+          multiple = TRUE, selected = c("United States", "China")),
+
+        selectInput("yvar", "Variable to Plot (Y-axis):",
+          choices = names(bank_data)[sapply(bank_data, is.numeric)],
+          selected = "population"),
+
+        sliderInput("years", "Year Range:", min = min(bank_data$year, na.rm = TRUE),
+          max = max(bank_data$year, na.rm = TRUE), value = c(1990, 2020), sep = ""),
+        
+        checkboxInput("scale_axis", "Log Scale for GDP", FALSE),
+        checkboxInput("switch_axis", "Switch Axis", FALSE)),
+
+      mainPanel(
+        tabsetPanel(
+          tabPanel("Trend Plot", plotOutput("trendPlot")),
+          tabPanel("Table", DTOutput("table"))
+        )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+
+  filtered <- reactive({
+    req(input$countries, input$yvar)
+
+    bank_data %>%
+      filter(country %in% input$countries, year >= input$years[1], year <= input$years[2])
+  })
+  output$trendPlot <- renderPlot({
+    df <- filtered()
+
+    p <- ggplot(df, aes(x = year, y = .data[[input$yvar]], color = country)) +
+      geom_line(linewidth = 1) +
+      geom_point() +
+      theme_minimal() +
+      labs(x = "Year", y = input$yvar, title = paste("Trend of", input$yvar, "Over Time"))
+    
+    if (input$scale_axis) p <- p + scale_y_log10(labels = scales::comma)
+    if (input$switch_axis) p <- p + coord_flip()
+    
+    p
+  })
+
+  output$table <- renderDT({
+    datatable(filtered())
+  })
+
+}
+
+shinyApp(ui, server)
+
+```
+
+## Adding Scatterplot
+
+```{r}
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(leaflet)
+
+bank_data <- read.csv("/Users/courtlanddrake/Data_Viz/world_bank_development_indicators.csv")
+
+# Ensure year is numeric (important!)
+bank_data$year <- substr(bank_data$date, 1, 4)
+bank_data$year <- as.numeric(bank_data$year)
+
+ui <- navbarPage("World Bank Visualization App",
+
+  tabPanel("Welcome",
+           fluidPage( titlePanel("Welcome to the World Bank Data Explorer"), br(),
+             h4("Use the tab above to explore World Bank development indicators, 
+                 visualize trends over time, and examine country-level changes."))
+  ),
+
+  tabPanel("World Bank Data", sidebarLayout(
+             sidebarPanel(h4("Trend Plot Controls"),
+               selectInput("countries", "Select Countries:",
+                           choices = sort(unique(bank_data$country)),
+                           multiple = TRUE, selected = c("United States", "China")),
+               selectInput("yvar", "Variable to Plot (Y-axis):",
+                           choices = names(bank_data)[sapply(bank_data, is.numeric)],
+                           selected = "population"),
+               sliderInput("years", "Year Range:", min = min(bank_data$year, na.rm = TRUE),
+                           max = max(bank_data$year, na.rm = TRUE), value = c(1990, 2020), sep = ""),
+               checkboxInput("scale_axis", "Log Scale for Y-Axis", FALSE),
+               checkboxInput("switch_axis", "Switch Axis", FALSE),
+               hr(),
+               
+               # Scatterplot controls in the sidebar
+               h4("Scatterplot Controls"),
+               selectInput("scatter_x", "X-axis Variable:",
+                           choices = names(bank_data)[sapply(bank_data, is.numeric)],
+                           selected = "GDP_current_US"),
+               selectInput("scatter_y", "Y-axis Variable:",
+                           choices = names(bank_data)[sapply(bank_data, is.numeric)],
+                           selected = "life_expectancy_at_birth"),
+               checkboxInput("switch_axis", "Switch Axis", FALSE)),
+
+             mainPanel(
+               tabsetPanel(
+                 tabPanel("Table", DTOutput("table")),
+                 tabPanel("Trend Plot", plotOutput("trendPlot")),
+                 tabPanel("Scatter Plot", plotOutput("globalScatterPlot"))
+               )
+             )
+           )
+  )
+)
+
+server <- function(input, output, session) {
+
+  filtered <- reactive({
+    req(input$countries, input$yvar)
+
+    bank_data %>%
+      filter(country %in% input$countries, year >= input$years[1], year <= input$years[2])
+  })
+  output$trendPlot <- renderPlot({
+    df <- filtered()
+
+    p <- ggplot(df, aes(x = year, y = .data[[input$yvar]], color = country)) +
+      geom_line(linewidth = 1) +
+      geom_point() +
+      theme_minimal() +
+      labs(x = "Year", y = input$yvar, title = paste("Trend of", input$yvar, "Over Time"))
+    
+    if (input$scale_axis) p <- p + scale_y_log10(labels = scales::comma)
+    if (input$switch_axis) p <- p + coord_flip()
+    
+    p
+  })
+
+  output$table <- renderDT({
+    datatable(filtered())
+  })
+  
+  output$globalScatterPlot <- renderPlot({
+    req(input$scatter_x, input$scatter_y)
+    
+    global_df <- bank_data %>% 
+      group_by(year) %>% 
+      summarise(x_avg = mean(.data[[input$scatter_x]], na.rm = TRUE),
+                y_avg = mean(.data[[input$scatter_y]], na.rm = TRUE))
+    
+    sp <- ggplot(global_df, aes(x = x_avg, y = y_avg)) +
+      geom_point() +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      theme_minimal() +
+      labs(x = paste("Global Average", input$scatter_x),
+           y = paste("Global Average", input$scatter_y),
+           title = paste("Global Relationship Between", input$scatter_x, "and", input$scatter_y))
+    
+    if (input$switch_axis) sp <- sp + coord_flip()
+    
+    sp
+  })
+
+}
+
+shinyApp(ui, server)
+```
+
+## Adding Geographic Plot
+```{r}
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(leaflet)
+library(maps)
+
+bank_data <- read.csv("/Users/courtlanddrake/Data_Viz/world_bank_development_indicators.csv")
+
+# Ensure year is numeric (important!)
+bank_data$year <- substr(bank_data$date, 1, 4)
+bank_data$year <- as.numeric(bank_data$year)
+
+ui <- navbarPage("World Bank Visualization App",
+
+  tabPanel("Welcome",
+           fluidPage( titlePanel("Welcome to the World Bank Data Explorer"), br(),
+             h4("Use the following tab to explore World Bank Data via various visualizations."))),
+
+  tabPanel("World Bank Data", sidebarLayout(
+             sidebarPanel(h4("Trend Plot Controls"),
+               selectInput("countries", "Select Countries:",
+                           choices = sort(unique(bank_data$country)),
+                           multiple = TRUE, selected = c("United States", "China")),
+               selectInput("yvar", "Variable to Plot (Y-axis):",
+                           choices = names(bank_data)[sapply(bank_data, is.numeric)],
+                           selected = "population"),
+               sliderInput("years", "Year Range:", min = min(bank_data$year, na.rm = TRUE),
+                           max = max(bank_data$year, na.rm = TRUE), value = c(1990, 2020), sep = ""),
+               checkboxInput("scale_axis", "Log Scale for Y-Axis", FALSE),
+               checkboxInput("switch_axis", "Switch Axis", FALSE),
+               hr(),
+               
+               # Scatterplot controls in the sidebar
+               h4("Scatterplot Controls"),
+               selectInput("scatter_x", "X-axis Variable:",
+                           choices = names(bank_data)[sapply(bank_data, is.numeric)],
+                           selected = "GDP_current_US"),
+               selectInput("scatter_y", "Y-axis Variable:",
+                           choices = names(bank_data)[sapply(bank_data, is.numeric)],
+                           selected = "life_expectancy_at_birth"),
+               checkboxInput("switch_axis", "Switch Axis", FALSE),
+               hr(),
+             
+               h4("World Map Controls"),
+               selectInput("map_year", "Select Year:", choices = sort(unique(bank_data$year)),
+                           selected = 2000),
+               selectInput("map_var", "Color Map By:", choices = names(bank_data)[sapply(
+                 bank_data, is.numeric)], selected = "GDP_current_US")),
+             
+             
+
+             mainPanel(
+               tabsetPanel(
+                 tabPanel("Table", DTOutput("table")),
+                 tabPanel("Trend Plot", plotOutput("trendPlot")),
+                 tabPanel("Scatter Plot", plotOutput("globalScatterPlot")),
+                 tabPanel("World Map", plotOutput("worldMapPlot", height = "600px"))))
+    )
+  )
+)
+
+server <- function(input, output, session) {
+
+  filtered <- reactive({
+    req(input$countries, input$yvar)
+
+    bank_data %>%
+      filter(country %in% input$countries, year >= input$years[1], year <= input$years[2])
+  })
+  #Trend Plot with coor and axis flip
+  output$trendPlot <- renderPlot({
+    df <- filtered()
+
+    p <- ggplot(df, aes(x = year, y = .data[[input$yvar]], color = country)) +
+      geom_line(linewidth = 1) +
+      geom_point() +
+      theme_minimal() +
+      labs(x = "Year", y = input$yvar, title = paste("Trend of", input$yvar, "Over Time"))
+    
+    if (input$scale_axis) p <- p + scale_y_log10(labels = scales::comma)
+    if (input$switch_axis) p <- p + coord_flip()
+    
+    p
+  })
+
+  output$table <- renderDT({
+    datatable(filtered())
+  })
+  
+  #Scatter Plot
+  output$globalScatterPlot <- renderPlot({
+    req(input$scatter_x, input$scatter_y)
+    
+    #Aggregate to global level
+    global_df <- bank_data %>% 
+      group_by(year) %>% 
+      summarise(x_avg = mean(.data[[input$scatter_x]], na.rm = TRUE),
+                y_avg = mean(.data[[input$scatter_y]], na.rm = TRUE))
+    
+    sp <- ggplot(global_df, aes(x = x_avg, y = y_avg)) +
+      geom_point() +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      theme_minimal() +
+      labs(x = paste("Global Average", input$scatter_x),
+           y = paste("Global Average", input$scatter_y),
+           title = paste("Global Relationship Between", input$scatter_x, "and", input$scatter_y))
+    
+    if (input$switch_axis) sp <- sp + coord_flip()
+    
+    sp
+  })
+  
+  # World Map Plot
+  output$worldMapPlot <- renderPlot({
+    df <- bank_data %>% filter(year == input$map_year)
+
+    # Fix country names for map compatibility
+    df <- df %>%
+      mutate(country = case_when(
+        country == "United States" ~ "USA",
+        country == "United Kingdom" ~ "UK",
+        country == "South Korea" ~ "Korea, South",
+        country == "North Korea" ~ "Korea, North",
+        country == "Congo, Dem. Rep." ~ "Democratic Republic of the Congo",
+        country == "Russian Federation" ~ "Russia",
+        TRUE ~ country
+      ))
+
+    world_map <- map_data("world")
+
+    world_data <- left_join(world_map, df, by = c("region" = "country"))
+
+    ggplot(world_data, aes(long, lat, group = group, fill = .data[[input$map_var]])) +
+      geom_polygon(color = "gray70", size = 0.1) +
+      coord_fixed(1.3) +
+      scale_fill_viridis_c(trans = "log10", option = "plasma") +
+      labs(title = paste("World Map of", input$map_var, "in", input$map_year),
+        fill = input$map_var) +
+      theme_minimal() +
+      theme(axis.text = element_blank(),axis.title = element_blank(),
+        panel.grid = element_blank(), plot.title = element_text(size = 15, face = "bold"))
+  })
+
+}
+
+shinyApp(ui, server)
+```
+
+## Starting Car Accident UI/Sever Implementation
+```{r}
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(leaflet)
+library(maps)
+
+car_accidents <- read.csv("/Users/courtlanddrake/Data_Viz/Accidents0515.csv")
+
+car_accidents$year <- substr(car_accidents$Date, 7, 10)
+car_accidents$year <- as.numeric(car_accidents$year)
+
+ui <- navbarPage("UK Car Accident Data Visualization App",
+
+  tabPanel("Welcome", 
+    fluidPage(titlePanel("Welcome to the UK Car Accident Data Explorer"), br(),
+      h4("Use the following tab to explore UK Car Accident Data via various visualizations."))),
+  
+  tabPanel("UK Car Accident Data",
+    sidebarLayout(sidebarPanel(h4("Trend Plot Controls"),
+        
+        #Add a dropdown to allow selection of x axis. If year is selected allow for a range to be chosen.
+        selectInput("trend_type", "Select Trend Type:",
+          choices = c("Year Range", "Day of Week")),
+        
+        conditionalPanel(condition = "input.trend_type == 'Year Range'",
+          sliderInput("year_range", "Select Year Range:",
+            min = min(car_accidents$year, na.rm = TRUE), max = max(car_accidents$year, na.rm = TRUE),
+            value = c(2005, 2015), sep = ""))),
+      
+      mainPanel(plotOutput("trend_plot"))
+    )
+  )
+)
+server <- function(input, output, session) {
+  
+  # Build a plot for yearly treads and frequency based on day of the week.
+  output$trend_plot <- renderPlot({
+    
+    data <- car_accidents
+    
+    if (input$trend_type == "Year Range") {
+      
+      df <- data %>%
+        filter(year >= input$year_range[1],
+               year <= input$year_range[2]) %>%
+        group_by(year) %>%
+        summarise(total_casualties = sum(Number_of_Casualties, na.rm = TRUE))
+      
+      ggplot(df, aes(x = year, y = total_casualties)) +
+        geom_line(size = 1, color = "blue") +
+        geom_point() +
+        labs(title = "Casualties by Year",
+             x = "Year",
+             y = "Total Casualties") +
+        theme_minimal()
+      
+    } else {
+      df <- data %>%
+        group_by(Day_of_Week) %>%
+        summarise(total_casualties = sum(Number_of_Casualties, na.rm = TRUE))
+      
+      ggplot(df, aes(x = Day_of_Week, y = total_casualties)) +
+        geom_col(color = "blue") +
+        labs(title = "Total Casualties by Day of Week", x = "Day of Week", y = "Total Casualties") +
+        theme_minimal()
+    }
+  })
+}
+
+shinyApp(ui, server)
+```
+
+## Adding Interactive Map
+```{r}
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(leaflet)
+library(leaflet.extras)
+library(maps)
+
+car_accidents <- read.csv("/Users/courtlanddrake/Data_Viz/Accidents0515.csv")
+
+car_accidents$year <- substr(car_accidents$Date, 7, 10)
+car_accidents$year <- as.numeric(car_accidents$year)
+
+ui <- navbarPage("UK Car Accident Data Visualization App",
+
+  tabPanel("Welcome", 
+    fluidPage(titlePanel("Welcome to the UK Car Accident Data Explorer"), br(),
+      h4("Use the following tab to explore UK Car Accident Data via various visualizations."))),
+  
+  tabPanel("UK Car Accident Data",
+    sidebarLayout(
+        sidebarPanel(h4("Trend Plot Controls"),
+        #Add a dropdown to allow selection of x axis. If year is selected allow for a range to be chosen.
+        selectInput("trend_type", "Select Trend Type:",
+          choices = c("Year Range", "Day of Week", "Type of Road")),
+        
+        conditionalPanel(
+          condition = "input.trend_type == 'Year Range'",
+          sliderInput("year_range", "Select Year Range:",
+            min = min(car_accidents$year, na.rm = TRUE), max = max(car_accidents$year, na.rm = TRUE),
+            value = c(2005, 2015), sep = "")),
+        
+        hr(),
+        #Add heat map controls that allows the user to select the year and severity level they want to view.
+        h4("Heat Map Controls"),
+        selectInput("heat_year", "Select Year:", choices = sort(unique(car_accidents$year)),
+                    selected = min(car_accidents$year)),
+        
+        selectInput("severity", "Select Severity Level:", 
+                    choices = c("All", sort(unique(car_accidents$Accident_Severity)))),
+        hr(),
+        
+        ),
+      
+      mainPanel(tabsetPanel(tabPanel("Data Table",DTOutput("table")),
+                            tabPanel("Trend Plot", plotOutput("trend_plot", height = "600px")),
+                            tabPanel("Heat Map", leafletOutput("heatmap_plot", height = "600px")))
+    )
+  )
+)
+)
+server <- function(input, output, session) {
+  #Build plots for each of the selections. Make sure the correct one is visible.
+  output$trend_plot <- renderPlot({
+    
+    data <- car_accidents
+    
+    if (input$trend_type == "Year Range") {
+      
+      df <- data %>%
+        filter(year >= input$year_range[1],
+               year <= input$year_range[2]) %>%
+        group_by(year) %>%
+        summarise(total_casualties = sum(Number_of_Casualties, na.rm = TRUE))
+      
+      ggplot(df, aes(x = year, y = total_casualties)) +
+        geom_line(size = 1, color = "blue") +
+        geom_point() +
+        labs(title = "Casualties by Year",
+             x = "Year",
+             y = "Total Casualties") +
+        theme_minimal()
+      #Need to add legends for day of the week and road type plots. those columns are numeric codes.
+    } else if (input$trend_type == "Day of Week") {
+      df <- data %>%
+        group_by(Day_of_Week) %>%
+        summarise(total_casualties = sum(Number_of_Casualties, na.rm = TRUE))
+      
+      ggplot(df, aes(x = factor(Day_of_Week), y = total_casualties)) +
+        geom_col(fill = "blue") +
+        labs(title = "Total Casualties by Day of Week", x = "Day of Week", y = "Total Casualties") +
+        theme_minimal()
+    
+      } else {
+      df <- data %>% 
+        group_by(Road_Type) %>% 
+        summarise(total_casualties = sum(Number_of_Casualties, na.rm = TRUE))
+      
+      ggplot(df, aes(x = factor(Road_Type), y = total_casualties)) +
+        geom_col(fill = "blue") +
+        labs(title = "Total Casualties by the Type of Road", x = "Type of Road", y = "Total Casualties") +
+        theme_minimal()
+    }
+  })
+  #Build interactive map using leaflet. Should change based on year and accident severity.
+  output$heatmap_plot <- renderLeaflet({
+
+    df <- car_accidents %>%
+      filter(year == input$heat_year) %>% 
+      filter(!is.na(Latitude), !is.na(Longitude))
+
+    # Apply severity filtering
+    if (input$severity != "All") {
+      df <- df %>% filter(Accident_Severity == input$severity)
+    }
+    #Make sure there is a tag showing the year being viewed.
+    leaflet(df) %>%
+      addTiles() %>%
+      addHeatmap(lng = ~Longitude, lat = ~Latitude,
+        intensity = ~Number_of_Casualties, radius = 15,
+        blur = 20, max = 0.05) %>%
+      setView(lng = -1.5, lat = 54, zoom = 6) %>% 
+      addControl(html = paste0("<h3>UK Car Accidents Heatmap - ", input$heat_year, "</h3>"), position = "topright")
+  })
+  output$table <- renderDT({
+  datatable(
+    car_accidents %>%
+      select(Date, year, Day_of_Week, Accident_Severity,
+             Number_of_Casualties, Latitude, Longitude),
+    options = list(pageLength = 15)
+  )
+})
+}
+
+shinyApp(ui, server)
+```
+
